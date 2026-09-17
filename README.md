@@ -74,3 +74,12 @@ metadata parts.
 
 `tools/make_tpl.py` regenerates the templates from source decks and will reintroduce that
 metadata, so strip it again after any regeneration.
+
+### Example contract numbers
+
+The contract numbers in code comments and in the on-screen help are illustrative, not real:
+the four-digit serial is written `XXXX`, as in `N00019-22-C-XXXX` and `N0001922CXXXX`. The
+`N#####-##-X-####` shape is kept deliberately, because those passages exist to document the
+file-naming convention and the normalisation that treats `N00019-22-C-XXXX`,
+`N00019 22 C XXXX` and `N0001922CXXXX` as one contract. Keep them as placeholders — nothing
+parses them, and a real award number is not needed to make the point.

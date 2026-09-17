@@ -193,7 +193,7 @@ table.t tr.clk{cursor:pointer}
 table.t td.n,table.t th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 table.t td.c,table.t th.c{text-align:center}
 table.t td.mono{font-family:var(--mono);font-size:11px}
-/* a contract number is one token - breaking "N00019-24-C-1063" across two lines
+/* a contract number is one token - breaking "N00019-24-C-XXXX" across two lines
    doubles every row of the register and reads as two different contracts */
 table.t td.nw,table.t th.nw{white-space:nowrap}
 table.t td.w{max-width:340px}
@@ -329,12 +329,12 @@ const SCHEMA = 2;       /* 1 = single snapshot; 2 = many periods. See migrate().
    This is not defensiveness for its own sake. Three real workbooks, three
    different layouts:
 
-     Aug-2026 (N00019-22-C-0041)  Appropriation | Participant | FY | CLIN |
+     Aug-2026 (N00019-22-C-XXXX)  Appropriation | Participant | FY | CLIN |
                                   CLIN Title | CLIN Type | ACRN | Obligations |
                                   Expenditures | ULO | EXPIRATION | CANCEL | Comments
-     Aug-2026 (N00019-15-C-0031)  the same thirteen, tab named with different case
+     Aug-2026 (N00019-15-C-XXXX)  the same thirteen, tab named with different case
                                   and a trailing space
-     FY21     (N00019-21-C-0020)  a SPACER column at 0, then PARTICIPANT | FY |
+     FY21     (N00019-21-C-XXXX)  a SPACER column at 0, then PARTICIPANT | FY |
                                   CLIN | CLIN Title | ACRN | Obligations |
                                   Expenditures | ULO | EXPIRATION | CANCEL
                                   - no Appropriation, no CLIN Type, no Comments,
@@ -595,7 +595,7 @@ async function xlsxRead(buf){
 
 /* ============================================================================
    FILE NAME - the contract number lives here and nowhere else in the workbook.
-   "N0001922C0041 O&M ULO Summary 8.26.26.xlsx"
+   "N0001922CXXXX O&M ULO Summary 8.26.26.xlsx"
      token 1  -> the PIIN, unpunctuated
      trailing -> the as-of date, M.D.YY
    ============================================================================ */
@@ -603,7 +603,7 @@ function parseFileName(name){
   const base = name.replace(/\.[a-z]+$/i,'');
   const tok  = base.split(/\s+/)[0] || '';
   const piin = tok.toUpperCase();
-  /* NAVAIR style: N00019 22 C 0041 -> N00019-22-C-0041. Anything that does not
+  /* NAVAIR style: N00019 22 C XXXX -> N00019-22-C-XXXX. Anything that does not
      match keeps its raw form; the tool never invents punctuation it cannot
      justify, and Verify reports the unrecognised shape. */
   const m = /^([A-Z]\d{5})(\d{2})([A-Z])(\d{4})$/.exec(piin);
@@ -629,7 +629,7 @@ function parseFileName(name){
 
    By SHAPE, not by name. The three real workbooks call it "AUG ULOs on O&M
    CLINs", "Aug ULOs on O&M CLINs " (trailing space) and
-   "N0001921C0020 FY21 AVSC ULOs" - the third does not contain "CLIN" at all,
+   "N0001921CXXXX FY21 AVSC ULOs" - the third does not contain "CLIN" at all,
    so any name-based rule silently drops it. Every sheet is scored by how much
    of the header it can actually resolve, and the best-scoring sheet carrying
    the required fields wins. A pivot tab scores low because it has no ACRN.
@@ -2314,7 +2314,7 @@ const CED = (function(){
                         1 Oct 2025 under the as-of. A hard bound, from the data.
 
      THIS CAN ONLY EVER CATCH A DISAGREEMENT. Neither piece of evidence proves
-     a date right, and the FY21 workbook - "N0001921C0020 FY21 AVSC ULOs" -
+     a date right, and the FY21 workbook - "N0001921CXXXX FY21 AVSC ULOs" -
      carries no month at all. Silence is therefore a valid answer and is
      reported as "nothing to check it against", never as agreement.
      ====================================================================== */
@@ -2433,7 +2433,7 @@ const CED = (function(){
                                     package - not a cell, not a sheet name,
                                     not the document properties
        the FY21 workbook            the detail tab is called
-                                    "N0001921C0020 FY21 AVSC ULOs"
+                                    "N0001921CXXXX FY21 AVSC ULOs"
 
      So on most files this reports "nothing to check it against", and that is
      the honest answer rather than a defect. Where the evidence IS there, a
@@ -2448,7 +2448,7 @@ const CED = (function(){
      ====================================================================== */
 
   /* A PIIN in free text, normalised so shape cannot hide a match:
-     N00019-22-C-0041, N00019 22 C 0041 and N0001922C0041 are one contract. */
+     N00019-22-C-XXXX, N00019 22 C XXXX and N0001922CXXXX are one contract. */
   const piinNorm = s => s_(s).toUpperCase().replace(/[^A-Z0-9]/g, '');
   function piinsIn(text){
     const t = s_(text), out = [];
@@ -2489,7 +2489,7 @@ const CED = (function(){
     if(!out.recognised)
       out.why.push({k:'bad', t:'"' + out.piin + '" is not in the N#####-##-X-#### shape. '
         + 'The contract number is the FIRST word of the file name, so a renamed or '
-        + 'copied file - "Copy of N00019-22-C-0041 ..." - lands under a contract '
+        + 'copied file - "Copy of N00019-22-C-XXXX ..." - lands under a contract '
         + 'called something else entirely.'});
 
     /* ---- two files claiming one contract in one period ------------------
@@ -2918,7 +2918,7 @@ const CED = (function(){
      WHY RULES AND NOT A LIST. Eighteen contracts is 11,835 CLIN lines; nobody
      is going to name a person against each one. So an entry is a RULE: it
      constrains any combination of contract, CLIN, ACRN and participant, and
-     applies to every line that matches. One row - "N00019-22-C-0041, KO, Jane
+     applies to every line that matches. One row - "N00019-22-C-XXXX, KO, Jane
      Smith" - covers three hundred lines. A second row naming a different PM for
      one CLIN overrides it, for that CLIN only.
 
@@ -3222,7 +3222,7 @@ const CED = (function(){
 
      What comes back is matched on `contract | CLIN | ACRN`, the same identity
      everything else is anchored to. The contract may return in either form -
-     "N0001922C0041" or "N00019-22-C-0041" - because that is how it went out.
+     "N0001922CXXXX" or "N00019-22-C-XXXX" - because that is how it went out.
      ====================================================================== */
 
   /* The three columns they fill in, and the identity columns we match on.
@@ -4726,7 +4726,7 @@ function viewVerify(){
         + (none.length===1?'':'s')+' carr'+(none.length===1?'ies':'y')
         + ' nothing to check the name against &mdash; no month in a sheet name and no '
         + 'fiscal year. The FY21 workbook is one of these: its tab is '
-        + '<span class="mono">N0001921C0020 FY21 AVSC ULOs</span>, which names no month. '
+        + '<span class="mono">N0001921CXXXX FY21 AVSC ULOs</span>, which names no month. '
         + 'That is not a fault; it is the absence of evidence, and it is said rather '
         + 'than counted as agreement.</div>';
 
@@ -4757,7 +4757,7 @@ function viewVerify(){
       + 'carries one in a cell, a sheet name or its document properties &mdash; so on '
       + 'those there is genuinely <b>nothing to check the name against</b>, and that is '
       + 'reported rather than dressed up as agreement. Where a workbook does name one, '
-      + 'as the FY21 tab <span class="mono">N0001921C0020 FY21 AVSC ULOs</span> does, it '
+      + 'as the FY21 tab <span class="mono">N0001921CXXXX FY21 AVSC ULOs</span> does, it '
       + 'is held against the name. Two more things need no evidence at all: a name that '
       + 'is <b>not the N#####-##-X-#### shape</b>, and <b>two files claiming one contract '
       + 'in one period</b> &mdash; where only one of them survives the import.</div>';
@@ -5333,7 +5333,7 @@ function viewCompare(){
       '<div class="empty"><div class="big">Only one period is loaded</div>'
       + 'Import a second month and this view compares them line by line.<br><br>'
       + 'The contract number and the month both come from the file name, so importing '
-      + '<span class="mono">' + esc((ps[0] && ps[0].files[0] ? ps[0].files[0].name : 'N0001922C0041 O&M ULO Summary 8.26.26.xlsx')) + '</span> '
+      + '<span class="mono">' + esc((ps[0] && ps[0].files[0] ? ps[0].files[0].name : 'N0001922CXXXX O&M ULO Summary 8.26.26.xlsx')) + '</span> '
       + 'and the September equivalent is all it takes.'
       + '<div style="margin-top:14px"><button class="mbtn go" data-act="import">Import another month</button></div>'
       + '</div>');
@@ -9677,7 +9677,7 @@ function pocForm(err){
     + '<div class="note b">This is a <b>rule</b>, not a row per line. Leave a box blank to mean '
     + '<i>any</i>. The rule that pins down the <b>most</b> boxes wins for a given line, so a '
     + 'contract-wide KO can be overridden for one CLIN without touching the first rule.</div>'
-    + row('Contract', inp('m.contract', p.m.contract, 'e.g. N0001922C0041 — blank for any'))
+    + row('Contract', inp('m.contract', p.m.contract, 'e.g. N0001922CXXXX — blank for any'))
     + row('CLIN', inp('m.clin', p.m.clin, 'blank for any'))
     + row('ACRN', inp('m.acrn', p.m.acrn, 'blank for any'))
     + row('Participant', inp('m.part', p.m.part, 'blank for any'))
@@ -10649,7 +10649,7 @@ function welcome(){
     + 'Pick them all at once - the dashboard reports across every contract you select.</div>'
     + '<p style="color:var(--ink2);max-width:70ch">The <b>contract number is read from the file name</b>, '
     + 'because it appears nowhere inside the workbook: the first word of '
-    + '<span class="mono">N0001922C0041 O&amp;M ULO Summary 8.26.26.xlsx</span> is the contract, and the '
+    + '<span class="mono">N0001922CXXXX O&amp;M ULO Summary 8.26.26.xlsx</span> is the contract, and the '
     + 'trailing date is the as-of. Inside, the tool looks for the detail tab - the sheet naming both '
     + '<i>ULO</i> and <i>CLIN</i> - and reads its thirteen columns from '
     + '<b>Appropriation</b> through <b>Comments</b>.</p>'
