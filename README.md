@@ -98,4 +98,27 @@ explaining what it owns:
 `03_core` and `04_model` are deliberately DOM-free so the model can be loaded
 into a bare Node VM and tested without a browser.
 
+## Tests
+
+```
+npm test            # or: node test/run.js
+```
+
+No install, no dependencies, no build — Node 18 or newer and nothing else.
+
+The suite extracts `03_core.js` and `04_model.js` from this HTML file by their
+banner comments and runs them in a `vm` context with no `document` and no
+`window`, so it tests the code that actually ships and enforces the DOM-free
+promise those two chunks open with. The clock is frozen at a stated instant,
+because `fyMonthNow()` decides which months count as elapsed and a suite that
+passed all year and failed in October would be worse than none.
+
+220 assertions covering the three rules the model holds to, the
+largest-remainder allocator (by worked example and by a seeded 4,000-case
+sweep), the `D + F + R = accepted` tie-out in every month of a year, and the
+schema 1 → 7 migration ladder. Two known defects in `migrate()` are recorded as
+expected failures rather than left in a comment.
+
+See `test/README.md` for the layout and for how to add a case.
+
 Version: v0.1

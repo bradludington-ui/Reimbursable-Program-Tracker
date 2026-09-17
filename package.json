@@ -1,0 +1,9 @@
+{
+  "name": "reimbursables-program-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "RPT - a single-file, offline tracker for a reimbursable program",
+  "scripts": {
+    "test": "node test/run.js"
+  }
+}
