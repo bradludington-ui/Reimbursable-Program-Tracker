@@ -254,19 +254,41 @@ module.exports = ({ describe, test, todo, eq, ok, deep, load }) => {
       eq(year(s, 0, 2026).upfront, undefined);
     });
 
-    todo('a year-level position with no efforts to land on is not silently discarded',
-      'schema 4 -> 5: the carry-down only runs when the year has efforts. A v4 year ' +
-      'holding an up-front position but no efforts loses the funder and the amount ' +
-      'entirely -- `delete y.upfront` runs either way, with nothing recorded. Reachable ' +
-      'for anyone who recorded the position before breaking the year into efforts.',
-      () => {
-        const RPT = load();
-        const file = v4(40000, []);
-        const s = adopt(RPT, file);
-        const y = year(s, 0, 2026);
-        ok(y.upfront || (y.efforts || []).some((e) => e.upfront),
-          'the funder and the 40,000 they sent should survive the upgrade somewhere');
-      });
+    test('a position with no efforts to land on is held, not discarded', () => {
+      /* the delete at the end of the year loop runs either way, so a position
+         that is not carried down is gone for good */
+      const RPT = load();
+      const s = adopt(RPT, v4(40000, []));
+      const y = year(s, 0, 2026);
+
+      eq(y.efforts.length, 1, 'one effort is created to hold it');
+      eq(y.efforts[0].name, 'General');
+      eq(y.efforts[0].code, 'GEN');
+      eq(y.efforts[0].requirement, 0, 'nothing is invented about what it costs');
+      ok(/before the year was broken into efforts/.test(y.efforts[0].note),
+        'and it says why it exists');
+
+      eq(y.efforts[0].upfront.sent, 40000, 'the whole amount lands on it');
+      eq(RPT.custCode(y.efforts[0].upfront.funder), 'USA', 'and the funder survives');
+    });
+
+    test('the held position reads correctly through the model', () => {
+      const RPT = load();
+      const s = adopt(RPT, v4(40000, []));
+      const U = RPT.upfront(s.groups[0], 2026);
+      ok(U, 'the group year has a position again');
+      eq(U.sent, 40000);
+      eq(RPT.custCode(U.funder), 'USA');
+    });
+
+    test('but a year that held nothing at all still gets no effort', () => {
+      const RPT = load();
+      const file = v4(40000, []);
+      delete file.groups[0].years['2026'].upfront;
+      const s = adopt(RPT, file);
+      deep(year(s, 0, 2026).efforts, [],
+        'the holder is created for a position, never for an empty year');
+    });
   });
 
   describe('migration / a cumulative MORD ledger becomes monthly positions', () => {
@@ -278,6 +300,23 @@ module.exports = ({ describe, test, todo, eq, ok, deep, load }) => {
       { id: 'm1', no: 'MORD-1', date: '2025-11-05', amount: 100000 },
       { id: 'm2', no: 'MORD-2', date: '2025-12-03', amount: 50000 }
     ];
+
+    /* the same ledger, in a file old enough that the position still sat on the
+       group year rather than on the effort */
+    function v4WithLedger() {
+      return {
+        v: 4,
+        customers: [{ id: 'c1', code: 'USA', name: 'US', kind: 'SERVICE', active: true }],
+        groups: [{
+          id: 'g1', code: 'DLA', name: 'Logistics',
+          years: { '2026': {
+            status: 'Active',
+            efforts: [{ id: 'e1', name: 'W', requirement: 300000, docs: [], invoices: [] }],
+            upfront: { funder: 'c1', sent: 300000, mords: ledger }
+          } }
+        }]
+      };
+    }
 
     function v5(mords) {
       return {
@@ -345,31 +384,63 @@ module.exports = ({ describe, test, todo, eq, ok, deep, load }) => {
       ok(!ms[0].carriedDown, 'nothing was converted, so nothing claims to have been');
     });
 
-    todo('a cumulative ledger carried down from a YEAR-level position is converted too',
-      'schema 4 -> 6: migrate() converts cumulative MORD ledgers inside the efforts ' +
-      'loop, but the year-level carry-down runs AFTER that loop. A v4 file therefore ' +
-      'lands its ledger on the effort still cumulative and with no `month`. ' +
-      'upfrontEffort then sorts on undefined, reads `current` as the last INCREMENT ' +
-      'rather than the position, and recon never matches a month -- so every elapsed ' +
-      'month counts as unreconciled. The same ledger in a v5 file converts correctly.',
-      () => {
-        const RPT = load();
-        const s = adopt(RPT, {
-          v: 4,
-          customers: [{ id: 'c1', code: 'USA', name: 'US', kind: 'SERVICE', active: true }],
-          groups: [{
-            id: 'g1', code: 'DLA', name: 'Logistics',
-            years: { '2026': {
-              status: 'Active',
-              efforts: [{ id: 'e1', name: 'W', requirement: 300000, docs: [], invoices: [] }],
+    test('a ledger carried down from a year-level position is converted too', () => {
+      /* it reaches an effort by a second route, and for a long time only the
+         first route converted it */
+      const RPT = load();
+      const s = adopt(RPT, v4WithLedger());
+      const ms = year(s, 0, 2026).efforts[0].upfront.mords;
+      eq(ms.length, 2);
+      eq(ms[0].month, '2025-11');
+      eq(ms[0].amount, 100000);
+      eq(ms[1].month, '2025-12');
+      eq(ms[1].amount, 150000, 'the running position, not the second increment');
+    });
+
+    test('both routes produce exactly the same ledger', () => {
+      const byYear = load();
+      adopt(byYear, v4WithLedger());
+      const byEffort = load();
+      adopt(byEffort, v5(ledger));
+
+      const strip = (ms) => ms.map((m) => ({ month: m.month, amount: m.amount, no: m.no }));
+      deep(strip(byYear.state.groups[0].years['2026'].efforts[0].upfront.mords),
+        strip(byEffort.state.groups[0].years['2026'].efforts[0].upfront.mords),
+        'where the position sat in the old file cannot change what it means');
+    });
+
+    test('the carried-down position reads as a position through the model', () => {
+      const RPT = load();
+      const s = adopt(RPT, v4WithLedger());
+      const U = RPT.upfrontEffort(s.groups[0], RPT.groupYears(s.groups[0])[0],
+        year(s, 0, 2026).efforts[0].id);
+      eq(U.current, 150000, 'the latest standing position, not the last increment');
+      eq(U.currentMonth, '2025-12');
+      ok(U.recon.some((r) => r.mord !== null), 'and the reconciliation can match a month');
+    });
+
+    test('a file saved while that was broken is repaired when next opened', () => {
+      /* the conversion is not gated on the schema version, so a file written
+         at schema 7 with an unconverted ledger heals on the next load */
+      const RPT = load();
+      const s = adopt(RPT, {
+        v: 7,
+        customers: [{ id: 'c1', code: 'USA', name: 'US', kind: 'SERVICE', active: true }],
+        groups: [{
+          id: 'g1', code: 'DLA', name: 'Logistics',
+          years: { '2026': {
+            status: 'Active',
+            efforts: [{
+              id: 'e1', name: 'W', requirement: 300000, docs: [], invoices: [],
               upfront: { funder: 'c1', sent: 300000, mords: ledger }
-            } }
-          }]
-        });
-        const ms = year(s, 0, 2026).efforts[0].upfront.mords;
-        eq(ms[1].month, '2025-12', 'every entry should carry the month it is trued to');
-        eq(ms[1].amount, 150000, 'and the running position, as the v5 path produces');
+            }]
+          } }
+        }]
       });
+      const ms = year(s, 0, 2026).efforts[0].upfront.mords;
+      deep(ms.map((m) => m.month), ['2025-11', '2025-12']);
+      eq(ms[1].amount, 150000);
+    });
   });
 
   describe('migration / a file survives the round trip', () => {

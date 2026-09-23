@@ -829,6 +829,50 @@ RPT.adopt = function (d) {
   return true;
 };
 
+/* --- schema 5 -> 6: a D&O MORD is a MONTHLY POSITION ------------------------
+   It used to be a cumulative ledger: three MORDs of $1M meant $3M released. It
+   is now the standing amount trued to BID D at a month end, so one entry per
+   month and the LATEST is the position. The old ledger is converted by taking
+   the running cumulative total at each month it touched, which preserves what
+   had been released by then.
+
+   This is a function rather than a block inside the migration because a ledger
+   reaches an effort by TWO routes -- sitting on it already, or carried down
+   from a year-level position -- and converting only the first route left a
+   schema 4 file reading its MORDs as increments rather than positions. Both
+   routes now go through here.
+
+   Returns the list unchanged when every entry already names its month, so it
+   is safe to run on every load; a file saved while the second route was broken
+   is repaired the next time it is opened. */
+RPT.monthlyMords = function (mords, firstMonth) {
+  var list = Array.isArray(mords) ? mords : [];
+  if (!list.some(function (m) { return !m.month; })) return list;
+  var old = list.slice().sort(function (a, b) {
+    return String(a.date || '').localeCompare(String(b.date || ''));
+  });
+  var byMonth = {}, order = [], run = 0;
+  old.forEach(function (m) {
+    run = Math.round((run + (Number(m.amount) || 0)) * 100) / 100;
+    var ym = /^(\d{4})-(\d{2})/.exec(String(m.date || ''));
+    var key = m.month || (ym ? ym[1] + '-' + ym[2] : firstMonth);
+    if (!byMonth[key]) { byMonth[key] = { ids: [], no: '', note: '' }; order.push(key); }
+    byMonth[key].amount = run;
+    byMonth[key].ids.push(m.no || m.id);
+    byMonth[key].no = m.no || byMonth[key].no;
+    byMonth[key].date = m.date;
+  });
+  return order.map(function (key) {
+    var b = byMonth[key];
+    return {
+      id: RPT.uid('m'), month: key, amount: b.amount, no: b.no, date: b.date,
+      note: 'Converted from a cumulative ledger; running position through ' +
+        RPT.monthLabel(key) + (b.ids.length > 1 ? ' (' + b.ids.join(', ') + ')' : ''),
+      carriedDown: true
+    };
+  });
+};
+
 /* Every read goes through here, so a file written by an older build loads
    without the rest of the code having to know what changed. */
 RPT.migrate = function (s) {
@@ -937,38 +981,33 @@ RPT.migrate = function (s) {
           if (!inv.vouchers || typeof inv.vouchers !== 'object') inv.vouchers = {};
         });
 
-        /* --- schema 5 -> 6: a D&O MORD is a MONTHLY POSITION -------------
-           It used to be a cumulative ledger: three MORDs of $1M meant $3M
-           released. It is now the standing amount trued to BID D at a month
-           end, so one entry per month and the LATEST is the position. The old
-           ledger is converted by taking the running cumulative total at each
-           month it touched, which preserves what had been released by then. */
-        if (e.upfront && (e.upfront.mords || []).some(function (m) { return !m.month; })) {
-          var old = e.upfront.mords.slice().sort(function (a, b) {
-            return String(a.date || '').localeCompare(String(b.date || ''));
-          });
-          var byMonth = {}, order = [], run = 0;
-          old.forEach(function (m) {
-            run = Math.round((run + (Number(m.amount) || 0)) * 100) / 100;
-            var ym = /^(\d{4})-(\d{2})/.exec(String(m.date || ''));
-            var key = m.month || (ym ? ym[1] + '-' + ym[2] : RPT.fyMonths(Number(k))[0]);
-            if (!byMonth[key]) { byMonth[key] = { ids: [], no: '', note: '' }; order.push(key); }
-            byMonth[key].amount = run;
-            byMonth[key].ids.push(m.no || m.id);
-            byMonth[key].no = m.no || byMonth[key].no;
-            byMonth[key].date = m.date;
-          });
-          e.upfront.mords = order.map(function (key) {
-            var b = byMonth[key];
-            return {
-              id: RPT.uid('m'), month: key, amount: b.amount, no: b.no, date: b.date,
-              note: 'Converted from a cumulative ledger; running position through ' +
-                RPT.monthLabel(key) + (b.ids.length > 1 ? ' (' + b.ids.join(', ') + ')' : ''),
-              carriedDown: true
-            };
-          });
+        /* --- schema 5 -> 6: a D&O MORD is a MONTHLY POSITION, never a
+           running total. The conversion lives in RPT.monthlyMords, because a
+           carried-down ledger has to go through exactly the same thing. --- */
+        if (e.upfront) {
+          e.upfront.mords = RPT.monthlyMords(e.upfront.mords, RPT.fyMonths(Number(k))[0]);
         }
       });
+
+      /* A year-level position with NO efforts to land on. It records a real
+         fact -- a named funder sent a stated amount -- and dropping it because
+         the year was never broken into efforts would lose that silently, since
+         the delete below runs either way. One effort is created to hold it, on
+         the same principle as schema 2 -> 3 giving a year that held a pool a
+         single "General" effort. A year that held NOTHING still gets none. */
+      if (y.upfront && !y.efforts.length) {
+        y.efforts.push({
+          id: RPT.uid('e'),
+          name: 'General',
+          code: 'GEN',
+          shareId: '',
+          requirement: 0,
+          note: 'Created to hold an up-front funding position recorded against ' +
+            RPT.fyLabel(Number(k)) + ' before the year was broken into efforts.',
+          docs: [],
+          invoices: []
+        });
+      }
 
       /* --- schema 4 -> 5: carry a year-level position DOWN onto the efforts.
          The funder sends a separate MIPR per effort, so the position was in the
@@ -994,7 +1033,12 @@ RPT.migrate = function (s) {
             sent: share,
             agency: src.agency || '',
             note: src.note || '',
-            mords: i === big ? (src.mords || []) : [],
+            /* the ledger is converted here too: a schema 4 file's MORDs are
+               cumulative and carry no month, and this is the only route by
+               which they reach an effort */
+            mords: i === big
+              ? RPT.monthlyMords(src.mords || [], RPT.fyMonths(Number(k))[0])
+              : [],
             carriedDown: i === big
               ? 'Carried down from a group-level position; the whole D&O MORD ledger was attached here.'
               : 'Carried down from a group-level position; sent split by requirement.'

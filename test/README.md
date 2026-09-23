@@ -61,24 +61,30 @@ The sweep is seeded, so a failure reproduces exactly.
 
 ## Known defects
 
-Some tests are wrapped in `todo(name, why, fn)`. They assert what *should* be
-true, are expected to fail, and are reported separately from real failures — so
-the suite stays green and a genuine regression is still visible, while the
+Some tests can be wrapped in `todo(name, why, fn)`. They assert what *should*
+be true, are expected to fail, and are reported separately from real failures —
+so the suite stays green and a genuine regression is still visible, while the
 defect is recorded precisely rather than in a comment nobody reads.
 
 If one starts passing, the runner reports that as a failure: the fix landed and
 the wrapper has to come off, or the protection is quietly lost.
 
-Two are recorded, both in `migrate()` and both reachable only from a schema-4
-file:
+**There are none outstanding.** The two the suite originally found — both in
+`migrate()`, both reachable only from a schema-4 file — have been fixed, and
+the tests that recorded them are now ordinary tests guarding the fix:
 
 - A cumulative D&O MORD ledger carried down from a **year-level** up-front
-  position is never converted to monthly positions. The conversion runs inside
-  the efforts loop; the carry-down runs after it. The same ledger in a
-  schema-5 file converts correctly.
-- A year-level up-front position on a year with **no efforts** is discarded
-  entirely — funder and amount both — because the carry-down only runs when
-  there are efforts to carry it down to.
+  position was never converted to monthly positions. A ledger reaches an effort
+  by two routes and only one of them converted; the conversion now lives in
+  `RPT.monthlyMords` and both routes go through it. Because the conversion is
+  not gated on schema version, a file saved while this was broken repairs
+  itself the next time it is opened.
+- A year-level position on a year with **no efforts** was discarded entirely,
+  funder and amount both, because the carry-down only ran when there were
+  efforts to carry it down to while the `delete` ran either way. One effort is
+  now created to hold it, on the same principle as schema 2 → 3 giving a year
+  that held a pool a single "General" effort. A year that held nothing still
+  gets none.
 
 ## Adding a test
 
@@ -106,9 +112,15 @@ would never produce. Customers are addressed by code, ids stay opaque.
 
 ## Checking the suite itself
 
-The tests were checked against thirteen deliberately broken copies of the app —
-naive per-line rounding, an off-by-one fiscal year boundary, `docNet` ignoring
-amendments, the MORD summed instead of read as a position, `parseMoney`
-returning 0 for unreadable input, the fact table dropping its remainder row, an
-invoice raised on an unbalanced table, the invoice panel recomputing from the
-live cost share, and others. All thirteen were caught.
+A passing suite proves nothing on its own, so the tests were run against
+nineteen deliberately broken copies of the app — naive per-line rounding, an
+off-by-one fiscal year boundary, `docNet` ignoring amendments, the MORD summed
+instead of read as a position, `parseMoney` returning 0 for unreadable input,
+the fact table dropping its remainder row, an invoice raised on an unbalanced
+table, the invoice panel recomputing from the live cost share, both migration
+defects reintroduced, and others. **All nineteen were caught.**
+
+That sweep is also how one real gap was found: the Rule 3 tests read
+`inv.lines` directly, but the invoice panel renders through `invoiceRows`, and
+a mutant that pointed that function back at the live cost share survived until
+a test was added for it.

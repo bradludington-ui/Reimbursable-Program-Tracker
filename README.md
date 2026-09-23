@@ -113,11 +113,11 @@ promise those two chunks open with. The clock is frozen at a stated instant,
 because `fyMonthNow()` decides which months count as elapsed and a suite that
 passed all year and failed in October would be worse than none.
 
-220 assertions covering the three rules the model holds to, the
+227 assertions covering the three rules the model holds to, the
 largest-remainder allocator (by worked example and by a seeded 4,000-case
 sweep), the `D + F + R = accepted` tie-out in every month of a year, and the
-schema 1 → 7 migration ladder. Two known defects in `migrate()` are recorded as
-expected failures rather than left in a comment.
+schema 1 → 7 migration ladder. The tests are themselves checked against
+nineteen deliberately broken builds, all of which they catch.
 
 See `test/README.md` for the layout and for how to add a case.
 
