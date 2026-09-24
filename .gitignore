@@ -1,0 +1,4 @@
+# The model suite needs nothing installed. The optional browser check
+# (test/ui/) pulls Playwright in on demand -- it is never committed.
+node_modules/
+package-lock.json

@@ -54,6 +54,7 @@ leak into the next.
 | `07-upfront` | The up-front position; the D&O MORD as a position, not a running total |
 | `08-migrate` | The schema ladder, 1 → 7 |
 | `09-validation` | Uniqueness and cross-year rules; rolling a year forward |
+| `10-respread` | The mid-year re-spread and the balancing invoice it raises |
 
 The allocator is tested by worked example *and* by a 4,000-case sweep against
 its stated invariant — the parts sum exactly to `round2(pool × Σpct / 100)`.
@@ -113,14 +114,36 @@ would never produce. Customers are addressed by code, ids stay opaque.
 ## Checking the suite itself
 
 A passing suite proves nothing on its own, so the tests were run against
-nineteen deliberately broken copies of the app — naive per-line rounding, an
+twenty-seven deliberately broken copies of the app — naive per-line rounding, an
 off-by-one fiscal year boundary, `docNet` ignoring amendments, the MORD summed
 instead of read as a position, `parseMoney` returning 0 for unreadable input,
-the fact table dropping its remainder row, an invoice raised on an unbalanced
-table, the invoice panel recomputing from the live cost share, both migration
-defects reintroduced, and others. **All nineteen were caught.**
+the fact table dropping its remainder row, the invoice panel recomputing from
+the live cost share, both migration defects reintroduced, the re-spread measured
+against the requirement instead of what was billed, its delta sign flipped, an
+adjustment made collectable and recomputable, and others.
 
-That sweep is also how one real gap was found: the Rule 3 tests read
-`inv.lines` directly, but the invoice panel renders through `invoiceRows`, and
-a mutant that pointed that function back at the live cost share survived until
-a test was added for it.
+**Twenty-six of the twenty-seven were caught.** The survivor is the `!R.balanced`
+check in `raiseRespread`, which `shareBalance` makes unreachable — it is
+belt-and-braces on a tie-out, and a test for it would have to stub the very
+function under test.
+
+The sweep is also how two real gaps were found. The Rule 3 tests read
+`inv.lines` directly, but the invoice panel renders through `invoiceRows`, and a
+mutant pointing that function at the live cost share survived until a test was
+added. And nothing checked that a participant whose share did *not* move gets no
+line on the balancing invoice, so a mutant writing zero lines survived too.
+
+## The browser check
+
+`node test/ui/respread.js` drives the re-spread the way the owner would: open
+the effort, re-spread it, approve the balancing invoice, then read what the
+panels say afterwards. It needs Playwright and is **not** part of `npm test`:
+
+```
+npm install --no-save playwright
+node test/ui/respread.js
+```
+
+It seeds a year through the model itself, embeds that state in a copy of the
+app, and works the real buttons — so it covers the half a headless suite cannot
+see, without putting a dependency in the way of the arithmetic tests.

@@ -771,8 +771,12 @@ RPT.fmtDate = function (s) {
    6 = the AF reimbursable stages. Invoices carry COLLECTIONS, so the three
        balance identifiers can be told apart (D unbilled, F billed-uncollected,
        R collected), and a D&O MORD is a MONTHLY POSITION trued to BID D rather
-       than a cumulative release                                              */
-RPT.SCHEMA = 7;
+       than a cumulative release
+   8 = an invoice has a KIND. A cost share can change inside a fiscal year and
+       applies back to 1 October; prior invoices are not reissued, so the
+       difference goes out as an ADJUSTMENT whose lines are signed differences
+       rather than a total split by a ratio. See RPT.raiseRespread.           */
+RPT.SCHEMA = 8;
 
 RPT.EMPTY = function () {
   return {
@@ -979,6 +983,10 @@ RPT.migrate = function (s) {
           if (!Array.isArray(inv.coll)) inv.coll = [];
           /* schema 6 -> 7: SF 1080 numbers issued against this invoice */
           if (!inv.vouchers || typeof inv.vouchers !== 'object') inv.vouchers = {};
+          /* schema 7 -> 8: every invoice predating adjustments is an ordinary
+             one. Named rather than inferred: "no kind" and "a bill" are
+             different statements, and only one of them is true here. */
+          if (!inv.kind) inv.kind = 'invoice';
         });
 
         /* --- schema 5 -> 6: a D&O MORD is a MONTHLY POSITION, never a
@@ -1663,6 +1671,15 @@ RPT.removeColl = function (inv, cid) {
 
 RPT.validateColl = function (inv, c, cid) {
   var e = [];
+  /* An adjustment redistributes what has already been billed; no new money is
+     due on it, and a participant it credits works that credit off against
+     later billing rather than being paid out. Cash settles against the invoice
+     that billed it, which is where it is reconcilable. */
+  if (RPT.isAdjustment(inv)) {
+    e.push('An adjustment is a redistribution, not a bill \u2014 there is nothing to collect ' +
+      'against it. Record the collection against the invoice that billed the money.');
+    return e;
+  }
   var v = Number(c.amount);
   if (!isFinite(v)) e.push('Enter the amount collected.');
   else if (v <= 0) e.push('A collection is a positive amount.');
@@ -1727,6 +1744,7 @@ RPT.raiseInvoice = function (g, fy, eid, o) {
 
   var inv = {
     id: RPT.uid('i'),
+    kind: 'invoice',       /* see RPT.raiseRespread for the other kind */
     month: o.month,
     total: RPT.round2(total),
     note: o.note || '',
@@ -1769,6 +1787,11 @@ RPT.invoiceStale = function (inv) {
 
 /* Re-snapshot an invoice against the table as it stands now. Never automatic. */
 RPT.recomputeInvoice = function (inv) {
+  /* An adjustment's lines are DIFFERENCES, not a total split by a ratio.
+     Re-splitting them as though they were would replace a true-up with a
+     meaningless allocation of its own net, which for a pure redistribution is
+     zero. There is nothing to recompute: raise a further re-spread instead. */
+  if (RPT.isAdjustment(inv)) return false;
   var sh = RPT.shareById(inv.shareId);
   if (!sh) return false;
   var bal = RPT.shareBalance(sh);
@@ -1798,6 +1821,204 @@ RPT.invoiceRows = function (inv) {
   return RPT.sortCustIds(Object.keys(inv.lines || {})).map(function (id) {
     return { cust: id, pct: (inv.pct || {})[id] || 0, amount: RPT.round2((inv.lines || {})[id] || 0) };
   });
+};
+
+/* ============================================================ re-spread == */
+
+/* A cost share can change INSIDE a fiscal year. The flying-hour reconciliation
+ * run in June or July is the usual cause, and it applies back to 1 October: the
+ * whole year has to be shared on the new ratio.
+ *
+ * Prior invoices are NOT reissued. They were sent, and the participant
+ * reconciles them against their own records; rewriting them would break that
+ * and Rule 3 both. What moves instead is a new invoice carrying the difference,
+ * which is how the office actually settles it.
+ *
+ * For each participant:
+ *   billed    what they have ACTUALLY been billed on this effort, read from the
+ *             invoice snapshots -- never recomputed
+ *   shouldBe  their slice of that same cumulative total, at the ratio as it
+ *             stands NOW
+ *   delta     shouldBe - billed, positive for under-billed, negative for over
+ *
+ * Nothing here reads a historical ratio, because it does not need one: every
+ * invoice already carries the split it was raised on, so the cumulative
+ * `billed` figure IS the history. That is the whole reason Rule 3 exists.
+ *
+ * THE DELTAS SUM TO ZERO. A ratio change redistributes what has been billed; it
+ * does not bill more. That is asserted rather than assumed, and it is why an
+ * unbalanced table is refused here exactly as it is for an invoice -- a 97%
+ * table would allocate 97% of the pool and quietly lose 3% of the year.
+ */
+RPT.respread = function (g, fy, eid) {
+  var e = RPT.effortById(g, fy, eid);
+  var sh = e ? RPT.shareById(e.shareId) : null;
+  var out = {
+    fy: fy, effort: e, share: sh, exists: !!e,
+    rows: [], from: [], pool: 0, moved: 0, net: 0, balanced: true, why: []
+  };
+  if (!e) { out.why.push('That effort no longer exists.'); return out; }
+  if (!sh) {
+    out.why.push('\u201c' + e.name + '\u201d has no cost share attached, so there is no ratio ' +
+      'to re-spread onto.');
+    return out;
+  }
+  var bal = RPT.shareBalance(sh);
+  if (bal.empty) out.why.push('\u201c' + sh.name + '\u201d has no customers on it.');
+  else if (!bal.ok) {
+    out.why.push('\u201c' + sh.name + '\u201d totals ' + RPT.fmtPct(bal.total) + ', not 100%. ' +
+      'A re-spread moves the whole of what has been billed onto the table \u2014 balance it first.');
+  }
+
+  /* what each participant has actually been billed, from the snapshots */
+  var billed = {}, from = [];
+  (e.invoices || []).forEach(function (iv) {
+    from.push(iv.id);
+    Object.keys(iv.lines || {}).forEach(function (cid) {
+      billed[cid] = RPT.round2((billed[cid] || 0) + (Number(iv.lines[cid]) || 0));
+    });
+  });
+  out.from = from;
+  var pool = 0;
+  Object.keys(billed).forEach(function (cid) { pool += billed[cid]; });
+  out.pool = RPT.round2(pool);
+
+  if (out.why.length) return out;
+  if (Math.abs(out.pool) < 0.005) {
+    out.why.push('Nothing has been invoiced on \u201c' + e.name + '\u201d yet, so there is ' +
+      'nothing to re-spread. The requirement split already follows the table as it stands.');
+    return out;
+  }
+
+  var P = RPT.sharePct(sh);
+  var order = RPT.sortCustIds(P.order);
+  var amts = RPT.allocate(out.pool, order.map(function (id) { return P.pct[id] || 0; }));
+  var should = {};
+  order.forEach(function (id, i) { should[id] = amts[i]; });
+
+  /* everyone on the table, plus anyone who has been billed and is no longer on
+     it -- their whole billed position comes back as a credit, which is a large
+     thing to do quietly, so it appears as its own row */
+  var seen = {}, all = [];
+  order.forEach(function (id) { seen[id] = 1; all.push(id); });
+  RPT.sortCustIds(Object.keys(billed)).forEach(function (id) {
+    if (!seen[id]) { seen[id] = 1; all.push(id); }
+  });
+
+  out.rows = all.map(function (id) {
+    var b = RPT.round2(billed[id] || 0);
+    var sb = RPT.round2(should[id] || 0);
+    return {
+      cust: id,
+      onShare: !!P.pct[id] || Object.prototype.hasOwnProperty.call(P.pct, id),
+      pct: P.pct[id] || 0,
+      billed: b,
+      shouldBe: sb,
+      delta: RPT.round2(sb - b)
+    };
+  });
+
+  out.moved = RPT.round2(out.rows.reduce(function (t, r) {
+    return t + (r.delta > 0 ? r.delta : 0);
+  }, 0));
+  out.net = RPT.round2(out.rows.reduce(function (t, r) { return t + r.delta; }, 0));
+  out.balanced = Math.abs(out.net) < 0.005;
+  out.changed = out.rows.some(function (r) { return Math.abs(r.delta) >= 0.005; });
+  return out;
+};
+
+/* Issue the difference as a new invoice.
+ *
+ * Its lines are the DELTAS -- signed -- not a total split by a ratio, and its
+ * total is whatever they add up to, which for a pure redistribution is zero.
+ * That is the one thing that makes it a different kind of record from every
+ * other invoice, and why RPT.recomputeInvoice refuses to touch it.
+ *
+ * A participant whose share went DOWN carries a negative line: a credit. It is
+ * worked off by the existing arithmetic without any further machinery -- their
+ * cumulative `invoiced` drops, their unbilled position rises by the same
+ * amount, and the next ordinary invoice bills them from the corrected base.
+ *
+ * Returns { ok:true, invoice } or { ok:false, why:[...] }.
+ */
+RPT.raiseRespread = function (g, fy, eid, o) {
+  o = o || {};
+  var R = RPT.respread(g, fy, eid);
+  var why = R.why.slice();
+
+  if (!o.month) why.push('Assign the adjustment to a month.');
+  else if (!RPT.inFy(o.month, fy)) {
+    why.push(RPT.monthLabel(o.month) + ' is not in ' + RPT.fyLabel(fy) +
+      ' \u2014 that year runs ' + RPT.monthLabel(RPT.fyMonths(fy)[0]) + ' through ' +
+      RPT.monthLabel(RPT.fyMonths(fy)[11]) + '.');
+  }
+  if (!why.length && !R.changed) {
+    why.push('Nothing to adjust \u2014 every participant has already been billed their share ' +
+      'of ' + RPT.fmtMoney(R.pool) + ' at this ratio.');
+  }
+  if (!why.length && !R.balanced) {
+    /* belt and braces: shareBalance already guards this, and the arithmetic
+       cannot produce it, but a tie-out that is asserted is worth asserting */
+    why.push('The adjustment does not balance \u2014 it would move ' + RPT.fmtMoney(R.net) +
+      ' that belongs to nobody. Nothing has been written.');
+  }
+  if (why.length) return { ok: false, why: why };
+
+  var e = R.effort, sh = R.share;
+  var lines = {}, pct = {}, before = {};
+  R.rows.forEach(function (r) {
+    if (Math.abs(r.delta) >= 0.005) lines[r.cust] = r.delta;
+    before[r.cust] = r.billed;
+    if (r.onShare) pct[r.cust] = r.pct;
+  });
+  var total = 0;
+  Object.keys(lines).forEach(function (cid) { total += lines[cid]; });
+
+  var inv = {
+    id: RPT.uid('i'),
+    kind: 'adjustment',
+    month: o.month,
+    total: RPT.round2(total),
+    note: o.note || '',
+    ref: o.ref || '',
+    reason: o.reason || '',
+    shareId: sh.id,
+    shareName: sh.name,
+    pct: pct,
+    lines: lines,
+    /* what it was computed FROM, so the true-up can be re-derived years later
+       without replaying every invoice by hand */
+    respread: {
+      pool: R.pool, billed: before, moved: R.moved,
+      /* the invoices this trued up, by id. Named rather than inferred from
+         dates: an adjustment and the next month's invoice can be raised on the
+         same day, and then no comparison of dates can tell them apart. */
+      invoices: R.from
+    },
+    coll: [],
+    raised: RPT.today()
+  };
+  e.invoices.push(inv);
+  RPT.touch();
+  return { ok: true, invoice: inv };
+};
+
+RPT.isAdjustment = function (inv) { return !!inv && inv.kind === 'adjustment'; };
+
+/* Which adjustment, if any, already carried this invoice's difference. An
+   invoice raised before a re-spread is SUPPOSED to disagree with today's table;
+   saying "stale, recompute?" about it would invite exactly the wrong action on
+   a document that has already gone out. */
+RPT.staleSettledBy = function (g, fy, eid, inv) {
+  var e = RPT.effortById(g, fy, eid);
+  if (!e || !inv || RPT.isAdjustment(inv)) return null;
+  var found = null;
+  (e.invoices || []).forEach(function (iv) {
+    if (!RPT.isAdjustment(iv)) return;
+    var ids = (iv.respread && iv.respread.invoices) || [];
+    if (ids.indexOf(inv.id) >= 0) found = iv;     /* the latest one that named it */
+  });
+  return found;
 };
 
 /* =========================================================== effort split = */
@@ -3972,6 +4193,12 @@ RPT.effortCard = function (g, fy, S) {
     h.push('<div class="eff-acts">' +
       '<button class="btn xs pri" data-act="addInvoice" data-id="' + g.id + '" data-fy="' + fy +
         '" data-eff="' + e.id + '">&#129534; Add invoice</button>' +
+      (S.invoicedAll !== 0
+        ? '<button class="btn xs" data-act="respread" data-id="' + g.id + '" data-fy="' + fy +
+          '" data-eff="' + e.id + '" title="The cost share changed inside the year and applies ' +
+          'back to 1 October. Prior invoices stay as sent; the difference goes out as a ' +
+          'balancing invoice.">&#8646; Re-spread&hellip;</button>'
+        : '') +
       '<button class="btn xs" data-act="addDoc" data-id="' + g.id + '" data-fy="' + fy +
         '" data-eff="' + e.id + '">&#43; MIPR</button>' +
       '<button class="btn xs" data-act="editEffort" data-id="' + g.id + '" data-fy="' + fy +
@@ -5466,16 +5693,24 @@ RPT.invoiceMini = function (g, fy, S) {
     '<th style="width:170px"></th></tr></thead><tbody>');
   invs.forEach(function (iv) {
     var st = RPT.invoiceStale(iv);
+    var adj = RPT.isAdjustment(iv);
+    var settled = adj ? null : RPT.staleSettledBy(g, fy, e.id, iv);
     var got = RPT.invCollected(iv), owing = RPT.invOutstanding(iv);
     h.push('<tr>' +
-      '<td><b>' + RPT.esc(RPT.monthLabel(iv.month)) + '</b></td>' +
+      '<td><b>' + RPT.esc(RPT.monthLabel(iv.month)) + '</b>' +
+        (adj ? ' <span class="chip qty">re-spread</span>' : '') + '</td>' +
       '<td class="dim">' + (iv.ref ? '<code>' + RPT.esc(iv.ref) + '</code>' : '—') + '</td>' +
-      '<td class="num" style="color:var(--green)">' + RPT.fmtMoney(iv.total) + '</td>' +
+      '<td class="num" style="color:' + (adj ? 'var(--dim)' : 'var(--green)') + '">' +
+        RPT.fmtMoney(iv.total) + '</td>' +
       '<td class="num"' + (owing < 0.005 ? ' style="color:var(--green)"' : ' class="num dim"') + '>' +
-        (got > 0 ? RPT.fmtMoney(got) : '—') +
-        (owing >= 0.005 && got > 0 ? ' <span class="chip d-Received">part</span>' : '') + '</td>' +
+        (adj ? '<span class="dim">n/a</span>'
+          : (got > 0 ? RPT.fmtMoney(got) : '—') +
+            (owing >= 0.005 && got > 0 ? ' <span class="chip d-Received">part</span>' : '')) + '</td>' +
       '<td class="dim">' + RPT.esc(iv.shareName || '—') +
-        (st.stale ? ' <span class="chip off">table changed</span>' : '') + '</td>' +
+        (adj ? '' :
+          settled ? ' <span class="chip ok">re-spread ' + RPT.esc(RPT.monthShort(settled.month)) +
+            '</span>'
+          : st.stale ? ' <span class="chip off">table changed</span>' : '') + '</td>' +
       '<td class="act">' +
         '<button class="btn xs" data-act="viewInvoice" data-id="' + g.id + '" data-fy="' + fy +
           '" data-eff="' + e.id + '" data-inv="' + iv.id + '">Review</button> ' +
@@ -5620,6 +5855,142 @@ RPT.invoiceCommit = function (gid, fy, eid) {
     RPT.monthLabel(res.invoice.month) + '.');
 };
 
+/* --------------------------------------------------------- the re-spread --- */
+
+/* The reconciliation panel. It shows the SAME figures RPT.respread computes and
+   the adjustment will store -- what each participant was billed, what the table
+   as it stands now says they should have been billed, and the difference -- so
+   what you approve is what gets written. */
+RPT.respreadDialog = function (gid, fy, eid) {
+  var g = RPT.groupById(gid);
+  if (!g) return;
+  var e = RPT.effortById(g, fy, eid);
+  if (!e) return;
+  var R = RPT.respread(g, fy, eid);
+
+  if (R.why.length) {
+    RPT.modal({
+      title: 'Re-spread \u201c' + RPT.esc(e.name) + '\u201d',
+      body: '<div class="callout bad">' + R.why.map(RPT.esc).join('<br>') + '</div>',
+      buttons: [{ label: 'Close', fn: RPT.closeModal }]
+    });
+    return;
+  }
+
+  var months = RPT.fyMonths(fy);
+  var nowNo = RPT.fyMonthNow(fy);
+  var defMonth = months[Math.max(0, Math.min(11, (nowNo || 1) - 1))];
+
+  var body =
+    '<div class="hint" style="margin-bottom:12px">' +
+      'The cost share applies back to <b>1 October</b>. The ' + R.from.length + ' invoice' +
+      (R.from.length === 1 ? '' : 's') + ' already raised are <b>left exactly as sent</b> \u2014 ' +
+      'the difference goes out as a new balancing invoice, which is what the participant ' +
+      'reconciles against their own records.' +
+    '</div>';
+
+  if (!R.changed) {
+    body += '<div class="callout info"><b>Nothing to adjust.</b><br>Every participant has ' +
+      'already been billed their share of ' + RPT.fmtMoney(R.pool) + ' at \u201c' +
+      RPT.esc(R.share.name) + '\u201d as it stands now.</div>';
+    RPT.modal({
+      title: 'Re-spread \u201c' + RPT.esc(e.name) + '\u201d',
+      body: body,
+      buttons: [{ label: 'Close', fn: RPT.closeModal }]
+    });
+    return;
+  }
+
+  body +=
+    '<div class="tw"><table class="w8"><thead><tr>' +
+      '<th>Participant</th>' +
+      '<th class="num" style="width:95px">Share now</th>' +
+      '<th class="num" style="width:140px">Billed to date</th>' +
+      '<th class="num" style="width:140px">Should have been</th>' +
+      '<th class="num" style="width:140px">Difference</th>' +
+    '</tr></thead><tbody>';
+
+  R.rows.forEach(function (r) {
+    var d = r.delta;
+    var col = Math.abs(d) < 0.005 ? 'var(--dim)' : (d > 0 ? 'var(--green)' : 'var(--red)');
+    body +=
+      '<tr><td>' + RPT.esc(RPT.custName(r.cust)) +
+        (r.onShare ? '' : ' <span class="chip off">off the table</span>') + '</td>' +
+      '<td class="num">' + (r.onShare ? RPT.fmtPct(r.pct) : '\u2014') + '</td>' +
+      '<td class="num dim">' + RPT.fmtMoney(r.billed) + '</td>' +
+      '<td class="num">' + RPT.fmtMoney(r.shouldBe) + '</td>' +
+      '<td class="num" style="color:' + col + ';font-weight:700">' +
+        (d > 0 ? '+' : '') + RPT.fmtMoney(d) + '</td></tr>';
+  });
+
+  body +=
+    '</tbody><tfoot><tr><td colspan="2">' + R.rows.length + ' participant' +
+      (R.rows.length === 1 ? '' : 's') + '</td>' +
+    '<td class="num">' + RPT.fmtMoney(R.pool) + '</td>' +
+    '<td class="num">' + RPT.fmtMoney(R.pool) + '</td>' +
+    '<td class="num">' + RPT.fmtMoney(R.net) + '</td></tr></tfoot></table></div>';
+
+  body +=
+    '<div class="callout info" style="margin-top:12px">' +
+      '<b>' + RPT.fmtMoney(R.moved) + '</b> moves between participants. The balancing invoice ' +
+      'nets to <b>' + RPT.fmtMoney(R.net) + '</b> \u2014 a re-spread redistributes what has ' +
+      'been billed, it does not bill more.<br>' +
+      'A participant shown in red has been over-billed; their line is a <b>credit</b>, which ' +
+      'raises their unbilled position and is worked off against what they are billed later ' +
+      'in the year. No cash is collected against this document.' +
+    '</div>';
+
+  body +=
+    '<div class="fgrid" style="margin-top:12px">' +
+      '<div class="fld"><label>Month</label><select id="rs_month">' +
+        months.map(function (m, i) {
+          return '<option value="' + m + '"' + (m === defMonth ? ' selected' : '') + '>' +
+            RPT.esc(RPT.monthLabel(m)) + ' \u2014 month ' + (i + 1) + '</option>';
+        }).join('') +
+      '</select><div class="hint">The month this goes out in, not the months it corrects.</div></div>' +
+      '<div class="fld"><label>Reference</label>' +
+        '<input type="text" id="rs_ref" placeholder="SF 1080 or voucher number"></div>' +
+      '<div class="fld wide"><label>Why the ratio changed</label>' +
+        '<input type="text" id="rs_reason" placeholder="FY' + String(fy).slice(-2) +
+        ' flying hour reconciliation">' +
+        '<div class="hint">Recorded on the adjustment, so the reason survives with the figures.</div>' +
+      '</div>' +
+      '<div class="fld wide"><label>Note</label><textarea id="rs_note" ' +
+        'placeholder="anything the next person reading this will need"></textarea></div>' +
+    '</div><div id="rs_err"></div>';
+
+  RPT.modal({
+    title: 'Re-spread \u201c' + RPT.esc(e.name) + '\u201d \u2014 ' + RPT.fyLabel(fy),
+    body: body,
+    focus: 'rs_reason',
+    buttons: [
+      { label: 'Cancel', fn: RPT.closeModal },
+      { label: 'Raise the balancing invoice', cls: 'pri',
+        fn: function () { RPT.respreadCommit(gid, fy, eid); } }
+    ]
+  });
+};
+
+RPT.respreadCommit = function (gid, fy, eid) {
+  var g = RPT.groupById(gid);
+  if (!g) return;
+  var res = RPT.raiseRespread(g, fy, eid, {
+    month: RPT.$('rs_month').value,
+    ref: RPT.$('rs_ref').value.trim(),
+    reason: RPT.$('rs_reason').value.trim(),
+    note: RPT.$('rs_note').value.trim()
+  });
+  if (!res.ok) {
+    RPT.$('rs_err').innerHTML = '<div class="err" style="margin-top:11px">' +
+      res.why.map(RPT.esc).join('<br>') + '</div>';
+    return;
+  }
+  RPT.grpOpen[gid] = true; RPT.effOpen[eid] = true;
+  RPT.closeModal();
+  RPT.go(RPT.view === 'invoices' ? 'invoices' : 'groups');
+  RPT.toast('Balancing invoice raised for ' + RPT.monthLabel(res.invoice.month) + '.');
+};
+
 /* ------------------------------------------------------------- review one --- */
 
 RPT.invoiceView = function (gid, fy, eid, iid) {
@@ -5630,6 +6001,7 @@ RPT.invoiceView = function (gid, fy, eid, iid) {
   var iv = RPT.byId(e.invoices || [], iid);
   if (!iv) return;
   var st = RPT.invoiceStale(iv);
+  var settledBy = RPT.staleSettledBy(g, fy, eid, iv);
   var rows = RPT.invoiceRows(iv);
   var sum = rows.reduce(function (t, r) { return t + r.amount; }, 0);
 
@@ -5643,30 +6015,56 @@ RPT.invoiceView = function (gid, fy, eid, iid) {
         (rows.length === 1 ? '' : 's') + '</span></div>' +
       '<div class="kpi"><span class="k">Raised</span><span class="v" style="font-size:14px">' +
         RPT.esc(RPT.fmtDate(iv.raised)) + '</span><span class="d">' +
-        (iv.recomputed ? 'recomputed ' + RPT.esc(RPT.fmtDate(iv.recomputed)) : 'never recomputed') +
+        (RPT.isAdjustment(iv) ? 'a re-spread, not a bill'
+          : iv.recomputed ? 'recomputed ' + RPT.esc(RPT.fmtDate(iv.recomputed))
+            : 'never recomputed') +
         '</span></div>' +
-      '<div class="kpi"><span class="k">Collected</span><span class="v ' +
-        (RPT.invOutstanding(iv) < 0.005 ? 'g' : 'a') + '">' +
-        RPT.fmtMoney(RPT.invCollected(iv)) + '</span><span class="d">' +
-        (RPT.invOutstanding(iv) < 0.005
-          ? 'settled — in BID R'
-          : RPT.fmtMoney(RPT.invOutstanding(iv)) + ' still in BID F') + '</span></div>' +
+      (RPT.isAdjustment(iv)
+        ? '<div class="kpi"><span class="k">Moved</span><span class="v gd">' +
+          RPT.fmtMoney((iv.respread || {}).moved) + '</span>' +
+          '<span class="d">between participants</span></div>'
+        : '<div class="kpi"><span class="k">Collected</span><span class="v ' +
+          (RPT.invOutstanding(iv) < 0.005 ? 'g' : 'a') + '">' +
+          RPT.fmtMoney(RPT.invCollected(iv)) + '</span><span class="d">' +
+          (RPT.invOutstanding(iv) < 0.005
+            ? 'settled — in BID R'
+            : RPT.fmtMoney(RPT.invOutstanding(iv)) + ' still in BID F') + '</span></div>') +
     '</div>' +
     '<div class="hint" style="margin-bottom:12px"><b>' + RPT.esc(g.code) + ' · ' +
       RPT.esc(e.name) + '</b> — split by “' + RPT.esc(iv.shareName || '—') + '” as it stood on ' +
       RPT.esc(RPT.fmtDate(iv.raised)) + '.' + (iv.ref ? ' Reference <code>' + RPT.esc(iv.ref) + '</code>.' : '') +
       '</div>' +
     (iv.note ? '<div class="callout info">' + RPT.esc(iv.note) + '</div>' : '') +
-    (st.stale
-      ? '<div class="callout"><b>Raised on percentages that have since changed</b> — ' +
-        RPT.esc(st.why) + '. The amounts below are what this invoice actually billed and are ' +
-        'left exactly as they were. <b>Recompute</b> re-splits the same total on the table as it ' +
-        'stands now; use it only if the invoice has not gone out.</div>'
-      : '') +
+    (RPT.isAdjustment(iv)
+      ? '<div class="callout info"><b>This is a balancing invoice, not a bill.</b><br>' +
+        '\u201c' + RPT.esc(iv.shareName || 'The cost share') + '\u201d changed inside ' +
+        RPT.fyLabel(fy) + ' and applies back to 1 October. The ' +
+        ((iv.respread && iv.respread.invoices) || []).length + ' invoice' +
+        (((iv.respread && iv.respread.invoices) || []).length === 1 ? '' : 's') +
+        ' already raised were left as sent; the lines below are the <b>difference</b> between ' +
+        'what each participant was billed of ' +
+        RPT.fmtMoney((iv.respread || {}).pool) + ' and what the new ratio says they owed. ' +
+        'A negative line is a credit, worked off against later billing \u2014 nothing is ' +
+        'collected against this document.' +
+        (iv.reason ? '<br><b>Reason:</b> ' + RPT.esc(iv.reason) : '') + '</div>'
+      : settledBy
+        ? '<div class="callout info"><b>Raised on percentages that have since changed, and ' +
+          'already settled.</b><br>' + RPT.esc(st.why) + '. The difference went out on the ' +
+          'balancing invoice of <b>' + RPT.esc(RPT.monthLabel(settledBy.month)) + '</b>, so this ' +
+          'invoice stands exactly as it was sent. Do not recompute it.</div>'
+        : st.stale
+          ? '<div class="callout"><b>Raised on percentages that have since changed</b> — ' +
+            RPT.esc(st.why) + '. The amounts below are what this invoice actually billed and are ' +
+            'left exactly as they were. If the ratio changed for the whole year, use ' +
+            '<b>Re-spread</b> on the effort rather than recomputing a document that has gone ' +
+            'out; <b>Recompute</b> re-splits the same total and is only safe before it is sent.' +
+            '</div>'
+          : '') +
     '<div class="tw"><table class="w8"><thead><tr><th>Customer</th>' +
       '<th class="num" style="width:120px">Share used</th>' +
       '<th class="num" style="width:120px">Share now</th>' +
-      '<th class="num" style="width:150px">Amount billed</th></tr></thead><tbody>' +
+      '<th class="num" style="width:150px">' +
+        (RPT.isAdjustment(iv) ? 'Difference' : 'Amount billed') + '</th></tr></thead><tbody>' +
     rows.map(function (r) {
       var shNow = RPT.shareById(iv.shareId);
       var Pn = RPT.sharePct(shNow);
@@ -5695,7 +6093,8 @@ RPT.invoiceView = function (gid, fy, eid, iid) {
   btns.push({ label: '\u21C6 OF 1017-G\u2026', fn: function () {
     RPT.voucherShow(RPT.of1017g(RPT.groupById(gid), fy, eid, 'cost', { invId: iid }));
   } });
-  if (st.stale && RPT.shareById(iv.shareId)) {
+  if (st.stale && !RPT.isAdjustment(iv) && !RPT.staleSettledBy(g, fy, eid, iv) &&
+      RPT.shareById(iv.shareId)) {
     btns.push({
       label: 'Recompute on today’s table', fn: function () {
         RPT.confirmDo('Recompute this invoice?',
@@ -5720,7 +6119,8 @@ RPT.invoiceView = function (gid, fy, eid, iid) {
   });
 
   RPT.modal({
-    title: 'Invoice — ' + RPT.esc(RPT.monthLabel(iv.month)),
+    title: (RPT.isAdjustment(iv) ? 'Balancing invoice — ' : 'Invoice — ') +
+      RPT.esc(RPT.monthLabel(iv.month)),
     body: body,
     buttons: btns
   });
@@ -5832,14 +6232,21 @@ RPT.renderInvoices = function () {
     '<th style="width:90px"></th></tr></thead><tbody>');
   list.forEach(function (r) {
     var st = RPT.invoiceStale(r.invoice);
+    var adj = RPT.isAdjustment(r.invoice);
+    var settled = adj ? null : RPT.staleSettledBy(r.group, fy, r.effort.id, r.invoice);
     h.push('<tr>' +
-      '<td><b>' + RPT.esc(RPT.monthLabel(r.invoice.month)) + '</b></td>' +
+      '<td><b>' + RPT.esc(RPT.monthLabel(r.invoice.month)) + '</b>' +
+        (adj ? ' <span class="chip qty">re-spread</span>' : '') + '</td>' +
       '<td><span class="grp-code">' + RPT.esc(r.group.code) + '</span></td>' +
       '<td>' + RPT.esc(r.effort.name) + '</td>' +
       '<td class="dim">' + (r.invoice.ref ? '<code>' + RPT.esc(r.invoice.ref) + '</code>' : '—') + '</td>' +
-      '<td class="num" style="color:var(--green)">' + RPT.fmtMoney(r.invoice.total) + '</td>' +
+      '<td class="num" style="color:' + (adj ? 'var(--dim)' : 'var(--green)') + '">' +
+        RPT.fmtMoney(r.invoice.total) + '</td>' +
       '<td class="dim">' + RPT.esc(r.invoice.shareName || '—') +
-        (st.stale ? ' <span class="chip off">table changed</span>' : '') + '</td>' +
+        (adj ? '' :
+          settled ? ' <span class="chip ok">re-spread ' +
+            RPT.esc(RPT.monthShort(settled.month)) + '</span>'
+          : st.stale ? ' <span class="chip off">table changed</span>' : '') + '</td>' +
       '<td class="act"><button class="btn xs" data-act="viewInvoice" data-id="' + r.group.id +
         '" data-fy="' + fy + '" data-eff="' + r.effort.id + '" data-inv="' + r.invoice.id +
         '">Review</button></td></tr>');
@@ -5987,6 +6394,18 @@ RPT.pickEffortDialog = function () {
    ledger, like amendments: a part payment then the balance are two facts, and
    folding them into one figure loses the date the first one settled. */
 RPT.collBlock = function (gid, fy, eid, iv) {
+  /* An adjustment redistributes what has already been billed. There is no new
+     money due on it, so there is nothing to collect -- and offering a button
+     that RPT.validateColl will always refuse would be worse than offering
+     none. What happens instead is said plainly. */
+  if (RPT.isAdjustment(iv)) {
+    return '<div class="sect"><span>Collections</span><span class="n">none \u2014 ' +
+      'a re-spread is not a bill</span></div>' +
+      '<div class="hint">Nothing is collected against a balancing invoice. The money it ' +
+      'moves was already billed on the invoices it corrects, and those carry their own ' +
+      'collections. A participant this credits works the credit off against what they are ' +
+      'billed later in the year.</div>';
+  }
   var got = RPT.invCollected(iv), owing = RPT.invOutstanding(iv);
   var h = ['<div class="sect"><span>Collections</span><span class="n">' +
     (iv.coll || []).length + ' recorded \u00b7 ' + RPT.fmtMoney(got) + ' of ' +
@@ -9230,6 +9649,7 @@ RPT.act = function (name, el) {
 
     /* --- invoices --- */
     case 'addInvoice': RPT.invoiceDialog(id, fy, eff); break;
+    case 'respread': RPT.respreadDialog(id, fy, eff); break;
     case 'viewInvoice': RPT.invoiceView(id, fy, eff, inv); break;
     case 'delInvoice': RPT.deleteInvoice(id, fy, eff, inv); break;
     case 'pickInvoice': RPT.pickInvoiceDialog(); break;

@@ -35,6 +35,34 @@ group DLA
    snapshotted from the cost share when it is raised; later edits to that table
    never rewrite them.
 
+## When the cost share changes mid-year
+
+A flying-hour reconciliation run in June or July applies back to 1 October, so
+the whole year has to be shared on the new ratio. Prior invoices are **not**
+reissued — they were sent, and the participant reconciles them against their own
+records. What goes out instead is a balancing invoice.
+
+For each participant the re-spread computes:
+
+| | |
+| --- | --- |
+| **billed** | what they have actually been billed, read from the invoice snapshots |
+| **should have been** | their slice of that same cumulative total, at the ratio as it stands now |
+| **difference** | the signed delta — positive under-billed, negative over-billed |
+
+A negative line is a **credit**: it raises that participant's unbilled position
+and is worked off against what they are billed later in the year. Nothing is
+collected against a balancing invoice, and it cannot be recomputed — its lines
+are differences, not a split of a total.
+
+**The deltas sum to zero.** A ratio change redistributes what has been billed; it
+does not bill more. That is asserted rather than assumed, which is why an
+unbalanced table is refused here exactly as it is for an ordinary invoice.
+
+No historical ratio is read, because none is needed: every invoice already
+carries the split it was raised on, so the cumulative billed figure *is* the
+history. That is what Rule 3 buys.
+
 ## What it does
 
 - **Groups** — the register: groups, their years, their efforts, requirements,
@@ -44,6 +72,10 @@ group DLA
 - **Invoices** — raise, review and list. Allocation uses largest-remainder
   rounding so the lines always sum to the cent. An invoice is refused on an
   unbalanced share table.
+- **Re-spread** — when the cost share changes *inside* a fiscal year and applies
+  back to 1 October. Prior invoices are left exactly as sent; the difference
+  goes out as a **balancing invoice** whose lines are signed differences rather
+  than a total split by a ratio, and which therefore nets to zero. See below.
 - **Reports** — executive summary (every group in the year), group review (one
   group in depth, plus history across years), and an ad-hoc builder. All three
   read the same facts, so a figure can never differ between two reports that
@@ -113,11 +145,15 @@ promise those two chunks open with. The clock is frozen at a stated instant,
 because `fyMonthNow()` decides which months count as elapsed and a suite that
 passed all year and failed in October would be worse than none.
 
-227 assertions covering the three rules the model holds to, the
+258 assertions covering the three rules the model holds to, the
 largest-remainder allocator (by worked example and by a seeded 4,000-case
 sweep), the `D + F + R = accepted` tie-out in every month of a year, and the
-schema 1 → 7 migration ladder. The tests are themselves checked against
-nineteen deliberately broken builds, all of which they catch.
+schema 1 → 8 migration ladder and the mid-year re-spread. The tests are
+themselves checked against twenty-seven deliberately broken builds, of which
+they catch twenty-six.
+
+`node test/ui/respread.js` additionally drives the reconciliation through a real
+browser. It needs Playwright and is opt-in; `npm test` stays dependency-free.
 
 See `test/README.md` for the layout and for how to add a case.
 

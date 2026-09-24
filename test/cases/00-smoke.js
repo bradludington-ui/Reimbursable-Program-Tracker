@@ -15,7 +15,7 @@ module.exports = ({ describe, test, ok, eq, load }) => {
 
     test('the loaded build is the schema the model expects', () => {
       const RPT = load();
-      eq(RPT.SCHEMA, 7, 'SCHEMA drives every migration branch; a bump needs new tests');
+      eq(RPT.SCHEMA, 8, 'SCHEMA drives every migration branch; a bump needs new tests');
       eq(RPT.EMPTY().v, RPT.SCHEMA, 'a fresh state should claim the current schema');
     });
 
